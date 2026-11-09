@@ -1,56 +1,49 @@
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+
 const app = express();
-const http = require('http').createServer(app);
-const io = require('socket.io')(server, {
+const server = http.createServer(app);
+
+const io = new Server(server, {
     cors: {
-        origin: "https://github.io",
-        methods: ["GET", "POST"],
-        credentials: true
+        origin: "*",
+        methods: ["GET", "POST"]
     }
 });
 
-
-let waitingPlayer = null;
+let rooms = {};
 
 io.on('connection', (socket) => {
-    console.log('プレイヤー接続: ' + socket.id);
+    socket.on('create_friend_room', (data) => {
+        let roomId = Math.random().toString(36).substring(2, 6).toUpperCase();
+        rooms[roomId] = { id: roomId, players: {}, max: data.maxPlayers || 2 };
+        rooms[roomId].players[1] = { id: socket.id, char: data.char };
+        socket.join(roomId);
+        socket.emit('friend_room_created', { roomId: roomId });
+    });
 
-    socket.on('join_match', (data) => {
-        if (waitingPlayer && waitingPlayer.id !== socket.id) {
-            const roomId = 'room_' + waitingPlayer.id + '_' + socket.id;
-            waitingPlayer.socket.join(roomId);
-            socket.join(roomId);
-
-            waitingPlayer.socket.emit('match_start', { role: 'host', roomId: roomId, stage: data.stage });
-            socket.emit('match_start', { role: 'guest', roomId: roomId, stage: data.stage });
-
-            console.log(`マッチ成立: ${roomId}`);
-            waitingPlayer = null;
-        } else {
-            waitingPlayer = { id: socket.id, socket: socket, char: data.char, stage: data.stage };
-            console.log('対戦相手を検索中...');
+    socket.on('join_friend_room', (data) => {
+        let r = rooms[data.roomId];
+        if (r) {
+            let slot = Object.keys(r.players).length + 1;
+            r.players[slot] = { id: socket.id, char: data.char };
+            socket.join(data.roomId);
+            io.to(data.roomId).emit('friend_room_joined', { roomId: data.roomId, currentPlayers: slot, maxPlayers: r.max });
+            if (slot >= r.max) {
+                io.to(data.roomId).emit('friend_match_start', { roomId: data.roomId, players: r.players });
+            }
         }
     });
 
-    socket.on('player_update', (data) => {
-        socket.to(data.roomId).emit('enemy_update', data);
-    });
-
-    socket.on('hit_enemy', (data) => {
-        socket.to(data.roomId).emit('receive_hit', {
-            dmgDeal: data.dmgDeal,
-            vx: -data.vx, // 1Pと2Pで左右反転
-            vy: data.vy,
-            knockbackTimer: data.knockbackTimer
-        });
-    });
-
-    socket.on('disconnect', () => {
-        console.log('切断: ' + socket.id);
-        if (waitingPlayer && waitingPlayer.id === socket.id) waitingPlayer = null;
+    socket.on('multi_player_update', (data) => {
+        let r = rooms[data.roomId];
+        if (r) {
+            r.players[socket.id] = data;
+            socket.to(data.roomId).emit('multi_enemy_update', { players: r.players });
+        }
     });
 });
 
-http.listen(3000, () => {
-    console.log('サーバーがポート3000で起動しました！');
-});
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, '0.0.0.0', () => {});
